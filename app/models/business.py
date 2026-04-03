@@ -16,7 +16,11 @@ class Business(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     whatsapp_number: Mapped[str] = mapped_column(String(20), nullable=True)
+    # Número del dueño para recibir notificaciones de pedidos nuevos
+    owner_whatsapp: Mapped[str] = mapped_column(String(20), nullable=True)
     logo_url: Mapped[str] = mapped_column(String(500), nullable=True)
+    # Tiempo estimado de preparación en minutos (se muestra al cliente)
+    estimated_minutes: Mapped[int] = mapped_column(default=15)
     currency: Mapped[str] = mapped_column(String(10), default="MXN")
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

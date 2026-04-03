@@ -27,7 +27,9 @@ async def seed():
         negocio = Business(
             name="Burger Palace",
             whatsapp_number="+521234567890",
+            owner_whatsapp="+521234567890",
             currency="MXN",
+            estimated_minutes=15,
             active=True,
         )
         session.add(negocio)

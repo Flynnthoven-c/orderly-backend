@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import ALLOWED_ORIGINS
 from app.database import engine, Base
+from app.routers.webhook import router as webhook_router
 
 
 @asynccontextmanager
@@ -32,6 +33,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Registrar routers
+app.include_router(webhook_router)
 
 
 @app.get("/")
