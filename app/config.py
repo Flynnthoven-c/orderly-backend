@@ -22,5 +22,12 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
 
+# Autenticación
+JWT_SECRET = os.getenv("JWT_SECRET", "orderly-dev-secret-change-in-production")
+JWT_EXPIRATION_DAYS = int(os.getenv("JWT_EXPIRATION_DAYS", "30"))
+# Contraseña del panel admin (solo tú)
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "admin@orderly.com")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
+
 # CORS
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")

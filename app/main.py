@@ -15,6 +15,8 @@ from app.routers.orders import router as orders_router
 from app.routers.customers import router as customers_router
 from app.routers.loyalty import router as loyalty_router
 from app.routers.dashboard import router as dashboard_router
+from app.routers.auth import router as auth_router
+from app.routers.admin import router as admin_router
 
 
 @asynccontextmanager
@@ -47,6 +49,8 @@ app.include_router(orders_router)
 app.include_router(customers_router)
 app.include_router(loyalty_router)
 app.include_router(dashboard_router)
+app.include_router(auth_router)
+app.include_router(admin_router)
 
 
 @app.get("/")

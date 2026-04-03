@@ -4,7 +4,7 @@ Cada negocio tiene su propio menú, clientes y pedidos.
 """
 
 from datetime import datetime
-from sqlalchemy import String, Boolean, DateTime
+from sqlalchemy import String, Boolean, DateTime, Integer
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -14,6 +14,9 @@ class Business(Base):
     __tablename__ = "businesses"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    # Credenciales de acceso al dashboard
+    email: Mapped[str] = mapped_column(String(200), unique=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(200), nullable=False)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     whatsapp_number: Mapped[str] = mapped_column(String(20), nullable=True)
     # Número del dueño para recibir notificaciones de pedidos nuevos

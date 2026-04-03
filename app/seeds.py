@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from app.database import engine, async_session, Base
 from app.models import Business, Product, LoyaltyRule
+from app.auth import hash_password
 
 
 async def seed():
@@ -25,6 +26,8 @@ async def seed():
 
         # Negocio de ejemplo
         negocio = Business(
+            email="demo@burgerpalace.com",
+            password_hash=hash_password("demo123"),
             name="Burger Palace",
             whatsapp_number="+521234567890",
             owner_whatsapp="+521234567890",
