@@ -10,6 +10,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import ALLOWED_ORIGINS
 from app.database import engine, Base
 from app.routers.webhook import router as webhook_router
+from app.routers.products import router as products_router
+from app.routers.orders import router as orders_router
+from app.routers.customers import router as customers_router
+from app.routers.loyalty import router as loyalty_router
+from app.routers.dashboard import router as dashboard_router
 
 
 @asynccontextmanager
@@ -37,6 +42,11 @@ app.add_middleware(
 
 # Registrar routers
 app.include_router(webhook_router)
+app.include_router(products_router)
+app.include_router(orders_router)
+app.include_router(customers_router)
+app.include_router(loyalty_router)
+app.include_router(dashboard_router)
 
 
 @app.get("/")
