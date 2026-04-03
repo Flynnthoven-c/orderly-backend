@@ -1,16 +1,18 @@
 """
 Orderly - Router del panel admin.
-Solo accesible con JWT de admin. Gestión de negocios suscritos.
+Solo accesible con JWT de admin. Gestión de negocios y analytics de la plataforma.
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from datetime import datetime, timedelta
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select, func
+from sqlalchemy import select, func, cast, Date, case, extract
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.auth import require_admin, hash_password
-from app.models import Business, Order, Customer
+from app.models import Business, Order, OrderItem, Product, Customer
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -33,36 +35,81 @@ class BusinessUpdate(BaseModel):
     currency: str | None = None
     estimated_minutes: int | None = None
     active: bool | None = None
-    # Si se envía, cambia la contraseña
     password: str | None = None
 
 
+# ─── CRUD de negocios ───────────────────────────────────────────────────────
+
 @router.get("/businesses", dependencies=[Depends(require_admin)])
 async def list_businesses(db: AsyncSession = Depends(get_db)):
-    """Lista todos los negocios suscritos con stats básicas."""
+    """Lista todos los negocios con stats detalladas."""
     result = await db.execute(select(Business).order_by(Business.created_at.desc()))
     businesses = result.scalars().all()
 
+    now = datetime.utcnow()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
     response = []
     for b in businesses:
-        # Contar pedidos totales
-        orders_result = await db.execute(
+        # Pedidos totales y del mes
+        total_orders = (await db.execute(
             select(func.count(Order.id)).where(Order.business_id == b.id)
-        )
-        total_orders = orders_result.scalar()
+        )).scalar()
 
-        # Contar clientes
-        customers_result = await db.execute(
+        month_orders = (await db.execute(
+            select(func.count(Order.id)).where(
+                Order.business_id == b.id,
+                Order.created_at >= month_start,
+            )
+        )).scalar()
+
+        # Clientes totales y nuevos este mes
+        total_customers = (await db.execute(
             select(func.count(Customer.id)).where(Customer.business_id == b.id)
-        )
-        total_customers = customers_result.scalar()
+        )).scalar()
 
-        # Ingresos totales
-        revenue_result = await db.execute(
+        new_customers_month = (await db.execute(
+            select(func.count(Customer.id)).where(
+                Customer.business_id == b.id,
+                Customer.created_at >= month_start,
+            )
+        )).scalar()
+
+        # Ingresos totales y del mes
+        total_revenue = float((await db.execute(
             select(func.coalesce(func.sum(Order.total), 0))
             .where(Order.business_id == b.id, Order.status == "delivered")
+        )).scalar())
+
+        month_revenue = float((await db.execute(
+            select(func.coalesce(func.sum(Order.total), 0))
+            .where(
+                Order.business_id == b.id,
+                Order.status == "delivered",
+                Order.created_at >= month_start,
+            )
+        )).scalar())
+
+        today_revenue = float((await db.execute(
+            select(func.coalesce(func.sum(Order.total), 0))
+            .where(
+                Order.business_id == b.id,
+                Order.status == "delivered",
+                Order.created_at >= today_start,
+            )
+        )).scalar())
+
+        # Ticket promedio
+        avg_ticket = total_revenue / total_orders if total_orders > 0 else 0
+
+        # Pedidos por canal
+        channel_result = await db.execute(
+            select(Order.channel, func.count(Order.id))
+            .where(Order.business_id == b.id)
+            .group_by(Order.channel)
         )
-        total_revenue = float(revenue_result.scalar())
+        orders_by_channel = {row[0]: row[1] for row in channel_result.all()}
 
         response.append({
             "id": b.id,
@@ -73,8 +120,14 @@ async def list_businesses(db: AsyncSession = Depends(get_db)):
             "active": b.active,
             "created_at": b.created_at,
             "total_orders": total_orders,
+            "month_orders": month_orders,
             "total_customers": total_customers,
+            "new_customers_month": new_customers_month,
             "total_revenue": total_revenue,
+            "month_revenue": month_revenue,
+            "today_revenue": today_revenue,
+            "avg_ticket": round(avg_ticket, 2),
+            "orders_by_channel": orders_by_channel,
         })
 
     return response
@@ -83,7 +136,6 @@ async def list_businesses(db: AsyncSession = Depends(get_db)):
 @router.post("/businesses", dependencies=[Depends(require_admin)], status_code=201)
 async def create_business(data: BusinessCreate, db: AsyncSession = Depends(get_db)):
     """Crea un nuevo negocio (dar de alta un cliente)."""
-    # Verificar email único
     existing = await db.execute(select(Business).where(Business.email == data.email))
     if existing.scalars().first():
         raise HTTPException(status_code=400, detail="Ya existe un negocio con ese email")
@@ -123,8 +175,6 @@ async def update_business(
         raise HTTPException(status_code=404, detail="Negocio no encontrado")
 
     update_data = data.model_dump(exclude_unset=True)
-
-    # Si envían password, hashearla
     if "password" in update_data:
         password = update_data.pop("password")
         if password:
@@ -134,14 +184,19 @@ async def update_business(
         setattr(business, field, value)
 
     await db.flush()
-
     return {"message": "Negocio actualizado", "id": business.id, "name": business.name}
 
+
+# ─── Stats globales ─────────────────────────────────────────────────────────
 
 @router.get("/stats", dependencies=[Depends(require_admin)])
 async def admin_stats(db: AsyncSession = Depends(get_db)):
     """Estadísticas generales de la plataforma."""
-    businesses_count = (await db.execute(select(func.count(Business.id)))).scalar()
+    now = datetime.utcnow()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    total_businesses = (await db.execute(select(func.count(Business.id)))).scalar()
     active_businesses = (await db.execute(
         select(func.count(Business.id)).where(Business.active == True)  # noqa: E712
     )).scalar()
@@ -150,11 +205,282 @@ async def admin_stats(db: AsyncSession = Depends(get_db)):
     total_revenue = float((await db.execute(
         select(func.coalesce(func.sum(Order.total), 0)).where(Order.status == "delivered")
     )).scalar())
+    month_revenue = float((await db.execute(
+        select(func.coalesce(func.sum(Order.total), 0)).where(
+            Order.status == "delivered",
+            Order.created_at >= month_start,
+        )
+    )).scalar())
+    today_revenue = float((await db.execute(
+        select(func.coalesce(func.sum(Order.total), 0)).where(
+            Order.status == "delivered",
+            Order.created_at >= today_start,
+        )
+    )).scalar())
+    today_orders = (await db.execute(
+        select(func.count(Order.id)).where(Order.created_at >= today_start)
+    )).scalar()
 
     return {
-        "total_businesses": businesses_count,
+        "total_businesses": total_businesses,
         "active_businesses": active_businesses,
         "total_orders": total_orders,
+        "today_orders": today_orders,
         "total_customers": total_customers,
         "total_revenue": total_revenue,
+        "month_revenue": month_revenue,
+        "today_revenue": today_revenue,
+    }
+
+
+# ─── Analytics detallados ───────────────────────────────────────────────────
+
+@router.get("/analytics/revenue", dependencies=[Depends(require_admin)])
+async def revenue_over_time(
+    days: int = Query(30, description="Últimos N días"),
+    business_id: int | None = Query(None, description="Filtrar por negocio"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Ingresos por día con desglose por canal."""
+    since = datetime.utcnow() - timedelta(days=days)
+
+    query = (
+        select(
+            cast(Order.created_at, Date).label("date"),
+            Order.channel,
+            func.coalesce(func.sum(Order.total), 0).label("revenue"),
+            func.count(Order.id).label("count"),
+        )
+        .where(Order.created_at >= since, Order.status == "delivered")
+        .group_by(cast(Order.created_at, Date), Order.channel)
+        .order_by(cast(Order.created_at, Date))
+    )
+    if business_id:
+        query = query.where(Order.business_id == business_id)
+
+    result = await db.execute(query)
+    rows = result.all()
+
+    # Agrupar por fecha
+    data: dict[str, dict] = {}
+    for row in rows:
+        date_str = str(row.date)
+        if date_str not in data:
+            data[date_str] = {"date": date_str, "whatsapp": 0, "presencial": 0, "total": 0, "orders": 0}
+        data[date_str][row.channel] = float(row.revenue)
+        data[date_str]["total"] += float(row.revenue)
+        data[date_str]["orders"] += row.count
+
+    return list(data.values())
+
+
+@router.get("/analytics/orders", dependencies=[Depends(require_admin)])
+async def orders_over_time(
+    days: int = Query(30, description="Últimos N días"),
+    business_id: int | None = Query(None, description="Filtrar por negocio"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Pedidos por día con desglose por estado y canal."""
+    since = datetime.utcnow() - timedelta(days=days)
+
+    # Por canal
+    channel_query = (
+        select(
+            cast(Order.created_at, Date).label("date"),
+            Order.channel,
+            func.count(Order.id).label("count"),
+        )
+        .where(Order.created_at >= since)
+        .group_by(cast(Order.created_at, Date), Order.channel)
+        .order_by(cast(Order.created_at, Date))
+    )
+    if business_id:
+        channel_query = channel_query.where(Order.business_id == business_id)
+
+    result = await db.execute(channel_query)
+    rows = result.all()
+
+    data: dict[str, dict] = {}
+    for row in rows:
+        date_str = str(row.date)
+        if date_str not in data:
+            data[date_str] = {"date": date_str, "whatsapp": 0, "presencial": 0, "total": 0}
+        data[date_str][row.channel] = row.count
+        data[date_str]["total"] += row.count
+
+    return list(data.values())
+
+
+@router.get("/analytics/customers", dependencies=[Depends(require_admin)])
+async def customers_over_time(
+    days: int = Query(30, description="Últimos N días"),
+    business_id: int | None = Query(None, description="Filtrar por negocio"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Nuevos clientes por día con desglose por canal."""
+    since = datetime.utcnow() - timedelta(days=days)
+
+    query = (
+        select(
+            cast(Customer.created_at, Date).label("date"),
+            Customer.channel,
+            func.count(Customer.id).label("count"),
+        )
+        .where(Customer.created_at >= since)
+        .group_by(cast(Customer.created_at, Date), Customer.channel)
+        .order_by(cast(Customer.created_at, Date))
+    )
+    if business_id:
+        query = query.where(Customer.business_id == business_id)
+
+    result = await db.execute(query)
+    rows = result.all()
+
+    data: dict[str, dict] = {}
+    for row in rows:
+        date_str = str(row.date)
+        if date_str not in data:
+            data[date_str] = {"date": date_str, "whatsapp": 0, "presencial": 0, "total": 0}
+        data[date_str][row.channel] = row.count
+        data[date_str]["total"] += row.count
+
+    return list(data.values())
+
+
+@router.get("/analytics/top-products", dependencies=[Depends(require_admin)])
+async def top_products(
+    days: int = Query(30, description="Últimos N días"),
+    business_id: int | None = Query(None, description="Filtrar por negocio"),
+    limit: int = Query(10, description="Top N productos"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Productos más vendidos con ingresos generados."""
+    since = datetime.utcnow() - timedelta(days=days)
+
+    query = (
+        select(
+            Product.name,
+            Business.name.label("business_name"),
+            func.sum(OrderItem.quantity).label("quantity"),
+            func.sum(OrderItem.quantity * OrderItem.unit_price).label("revenue"),
+        )
+        .join(OrderItem, OrderItem.product_id == Product.id)
+        .join(Order, Order.id == OrderItem.order_id)
+        .join(Business, Business.id == Order.business_id)
+        .where(Order.created_at >= since)
+        .group_by(Product.name, Business.name)
+        .order_by(func.sum(OrderItem.quantity).desc())
+        .limit(limit)
+    )
+    if business_id:
+        query = query.where(Order.business_id == business_id)
+
+    result = await db.execute(query)
+    return [
+        {
+            "product": row.name,
+            "business": row.business_name,
+            "quantity": int(row.quantity),
+            "revenue": float(row.revenue),
+        }
+        for row in result.all()
+    ]
+
+
+@router.get("/analytics/business/{business_id}", dependencies=[Depends(require_admin)])
+async def business_detail(
+    business_id: int,
+    days: int = Query(30, description="Últimos N días"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Detalle completo de un negocio específico para drill-down."""
+    result = await db.execute(select(Business).where(Business.id == business_id))
+    business = result.scalars().first()
+    if not business:
+        raise HTTPException(status_code=404, detail="Negocio no encontrado")
+
+    since = datetime.utcnow() - timedelta(days=days)
+    now = datetime.utcnow()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # Pedidos por estado
+    status_result = await db.execute(
+        select(Order.status, func.count(Order.id))
+        .where(Order.business_id == business_id, Order.created_at >= since)
+        .group_by(Order.status)
+    )
+    orders_by_status = {row[0]: row[1] for row in status_result.all()}
+
+    # Pedidos por hora del día (para saber las horas pico)
+    hour_result = await db.execute(
+        select(
+            extract("hour", Order.created_at).label("hour"),
+            func.count(Order.id).label("count"),
+        )
+        .where(Order.business_id == business_id, Order.created_at >= since)
+        .group_by(extract("hour", Order.created_at))
+        .order_by(extract("hour", Order.created_at))
+    )
+    orders_by_hour = [{"hour": int(row.hour), "orders": row.count} for row in hour_result.all()]
+
+    # Top 5 productos
+    top_result = await db.execute(
+        select(
+            Product.name,
+            func.sum(OrderItem.quantity).label("quantity"),
+            func.sum(OrderItem.quantity * OrderItem.unit_price).label("revenue"),
+        )
+        .join(OrderItem, OrderItem.product_id == Product.id)
+        .join(Order, Order.id == OrderItem.order_id)
+        .where(Order.business_id == business_id, Order.created_at >= since)
+        .group_by(Product.name)
+        .order_by(func.sum(OrderItem.quantity).desc())
+        .limit(5)
+    )
+    top_products = [
+        {"product": row.name, "quantity": int(row.quantity), "revenue": float(row.revenue)}
+        for row in top_result.all()
+    ]
+
+    # Top 5 clientes
+    top_customers_result = await db.execute(
+        select(
+            Customer.name,
+            Customer.phone,
+            func.count(Order.id).label("orders"),
+            func.coalesce(func.sum(Order.total), 0).label("spent"),
+        )
+        .join(Order, Order.customer_id == Customer.id)
+        .where(Order.business_id == business_id, Order.created_at >= since)
+        .group_by(Customer.id, Customer.name, Customer.phone)
+        .order_by(func.coalesce(func.sum(Order.total), 0).desc())
+        .limit(5)
+    )
+    top_customers = [
+        {"name": row.name, "phone": row.phone, "orders": row.orders, "spent": float(row.spent)}
+        for row in top_customers_result.all()
+    ]
+
+    # Pedidos activos ahora
+    active_orders = (await db.execute(
+        select(func.count(Order.id)).where(
+            Order.business_id == business_id,
+            Order.status.in_(["pending", "preparing", "ready"]),
+        )
+    )).scalar()
+
+    return {
+        "business": {
+            "id": business.id,
+            "name": business.name,
+            "email": business.email,
+            "currency": business.currency,
+            "active": business.active,
+            "created_at": business.created_at,
+        },
+        "orders_by_status": orders_by_status,
+        "orders_by_hour": orders_by_hour,
+        "top_products": top_products,
+        "top_customers": top_customers,
+        "active_orders": active_orders,
     }
