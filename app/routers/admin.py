@@ -191,10 +191,14 @@ async def update_business(
 
 @router.get("/stats", dependencies=[Depends(require_admin)])
 async def admin_stats(db: AsyncSession = Depends(get_db)):
-    """Estadísticas generales de la plataforma."""
+    """Estadísticas generales de la plataforma con comparación vs período anterior."""
     now = datetime.utcnow()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday_start = today_start - timedelta(days=1)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    prev_month_start = (month_start - timedelta(days=1)).replace(day=1)
+    week_start = today_start - timedelta(days=today_start.weekday())
+    prev_week_start = week_start - timedelta(days=7)
 
     total_businesses = (await db.execute(select(func.count(Business.id)))).scalar()
     active_businesses = (await db.execute(
@@ -205,31 +209,133 @@ async def admin_stats(db: AsyncSession = Depends(get_db)):
     total_revenue = float((await db.execute(
         select(func.coalesce(func.sum(Order.total), 0)).where(Order.status == "delivered")
     )).scalar())
+
+    # Este mes vs mes anterior
     month_revenue = float((await db.execute(
         select(func.coalesce(func.sum(Order.total), 0)).where(
-            Order.status == "delivered",
-            Order.created_at >= month_start,
+            Order.status == "delivered", Order.created_at >= month_start,
         )
     )).scalar())
-    today_revenue = float((await db.execute(
+    prev_month_revenue = float((await db.execute(
         select(func.coalesce(func.sum(Order.total), 0)).where(
             Order.status == "delivered",
-            Order.created_at >= today_start,
+            Order.created_at >= prev_month_start,
+            Order.created_at < month_start,
         )
     )).scalar())
+
+    month_orders = (await db.execute(
+        select(func.count(Order.id)).where(Order.created_at >= month_start)
+    )).scalar()
+    prev_month_orders = (await db.execute(
+        select(func.count(Order.id)).where(
+            Order.created_at >= prev_month_start, Order.created_at < month_start,
+        )
+    )).scalar()
+
+    month_customers = (await db.execute(
+        select(func.count(Customer.id)).where(Customer.created_at >= month_start)
+    )).scalar()
+    prev_month_customers = (await db.execute(
+        select(func.count(Customer.id)).where(
+            Customer.created_at >= prev_month_start, Customer.created_at < month_start,
+        )
+    )).scalar()
+
+    # Hoy vs ayer
+    today_revenue = float((await db.execute(
+        select(func.coalesce(func.sum(Order.total), 0)).where(
+            Order.status == "delivered", Order.created_at >= today_start,
+        )
+    )).scalar())
+    yesterday_revenue = float((await db.execute(
+        select(func.coalesce(func.sum(Order.total), 0)).where(
+            Order.status == "delivered",
+            Order.created_at >= yesterday_start,
+            Order.created_at < today_start,
+        )
+    )).scalar())
+
     today_orders = (await db.execute(
         select(func.count(Order.id)).where(Order.created_at >= today_start)
+    )).scalar()
+    yesterday_orders = (await db.execute(
+        select(func.count(Order.id)).where(
+            Order.created_at >= yesterday_start, Order.created_at < today_start,
+        )
+    )).scalar()
+
+    # Esta semana vs semana anterior
+    week_revenue = float((await db.execute(
+        select(func.coalesce(func.sum(Order.total), 0)).where(
+            Order.status == "delivered", Order.created_at >= week_start,
+        )
+    )).scalar())
+    prev_week_revenue = float((await db.execute(
+        select(func.coalesce(func.sum(Order.total), 0)).where(
+            Order.status == "delivered",
+            Order.created_at >= prev_week_start,
+            Order.created_at < week_start,
+        )
+    )).scalar())
+
+    # Ticket promedio este mes
+    avg_ticket = month_revenue / month_orders if month_orders > 0 else 0
+    prev_avg_ticket = prev_month_revenue / prev_month_orders if prev_month_orders > 0 else 0
+
+    # WhatsApp adoption rate
+    wa_orders = (await db.execute(
+        select(func.count(Order.id)).where(
+            Order.channel == "whatsapp", Order.created_at >= month_start,
+        )
+    )).scalar()
+    wa_rate = (wa_orders / month_orders * 100) if month_orders > 0 else 0
+
+    prev_wa_orders = (await db.execute(
+        select(func.count(Order.id)).where(
+            Order.channel == "whatsapp",
+            Order.created_at >= prev_month_start,
+            Order.created_at < month_start,
+        )
+    )).scalar()
+    prev_wa_rate = (prev_wa_orders / prev_month_orders * 100) if prev_month_orders > 0 else 0
+
+    # Pedidos activos ahora
+    active_orders = (await db.execute(
+        select(func.count(Order.id)).where(
+            Order.status.in_(["pending", "preparing", "ready"])
+        )
     )).scalar()
 
     return {
         "total_businesses": total_businesses,
         "active_businesses": active_businesses,
         "total_orders": total_orders,
-        "today_orders": today_orders,
         "total_customers": total_customers,
         "total_revenue": total_revenue,
-        "month_revenue": month_revenue,
-        "today_revenue": today_revenue,
+        "active_orders": active_orders,
+        "today": {
+            "revenue": today_revenue,
+            "orders": today_orders,
+            "prev_revenue": yesterday_revenue,
+            "prev_orders": yesterday_orders,
+        },
+        "week": {
+            "revenue": week_revenue,
+            "prev_revenue": prev_week_revenue,
+        },
+        "month": {
+            "revenue": month_revenue,
+            "orders": month_orders,
+            "customers": month_customers,
+            "avg_ticket": round(avg_ticket, 2),
+            "wa_rate": round(wa_rate, 1),
+            "prev_revenue": prev_month_revenue,
+            "prev_orders": prev_month_orders,
+            "prev_customers": prev_month_customers,
+            "prev_avg_ticket": round(prev_avg_ticket, 2),
+            "prev_wa_rate": round(prev_wa_rate, 1),
+        },
     }
 
 
@@ -484,3 +590,105 @@ async def business_detail(
         "top_customers": top_customers,
         "active_orders": active_orders,
     }
+
+
+@router.get("/analytics/business-ranking", dependencies=[Depends(require_admin)])
+async def business_ranking(
+    days: int = Query(30, description="Últimos N días"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Ranking de negocios por ingresos con métricas comparativas."""
+    since = datetime.utcnow() - timedelta(days=days)
+    prev_since = since - timedelta(days=days)
+
+    result = await db.execute(select(Business).where(Business.active == True))  # noqa: E712
+    businesses = result.scalars().all()
+
+    ranking = []
+    for b in businesses:
+        # Ingresos período actual
+        revenue = float((await db.execute(
+            select(func.coalesce(func.sum(Order.total), 0))
+            .where(Order.business_id == b.id, Order.status == "delivered", Order.created_at >= since)
+        )).scalar())
+
+        # Ingresos período anterior
+        prev_revenue = float((await db.execute(
+            select(func.coalesce(func.sum(Order.total), 0))
+            .where(
+                Order.business_id == b.id, Order.status == "delivered",
+                Order.created_at >= prev_since, Order.created_at < since,
+            )
+        )).scalar())
+
+        # Pedidos período actual
+        orders = (await db.execute(
+            select(func.count(Order.id))
+            .where(Order.business_id == b.id, Order.created_at >= since)
+        )).scalar()
+
+        prev_orders = (await db.execute(
+            select(func.count(Order.id))
+            .where(
+                Order.business_id == b.id,
+                Order.created_at >= prev_since, Order.created_at < since,
+            )
+        )).scalar()
+
+        # Clientes únicos
+        unique_customers = (await db.execute(
+            select(func.count(func.distinct(Order.customer_id)))
+            .where(Order.business_id == b.id, Order.created_at >= since)
+        )).scalar()
+
+        avg_ticket = revenue / orders if orders > 0 else 0
+
+        # Channel mix
+        wa_count = (await db.execute(
+            select(func.count(Order.id))
+            .where(Order.business_id == b.id, Order.channel == "whatsapp", Order.created_at >= since)
+        )).scalar()
+        wa_pct = (wa_count / orders * 100) if orders > 0 else 0
+
+        ranking.append({
+            "id": b.id,
+            "name": b.name,
+            "revenue": revenue,
+            "prev_revenue": prev_revenue,
+            "orders": orders,
+            "prev_orders": prev_orders,
+            "unique_customers": unique_customers,
+            "avg_ticket": round(avg_ticket, 2),
+            "wa_percentage": round(wa_pct, 1),
+        })
+
+    ranking.sort(key=lambda x: x["revenue"], reverse=True)
+    return ranking
+
+
+@router.get("/analytics/peak-hours", dependencies=[Depends(require_admin)])
+async def peak_hours(
+    days: int = Query(30, description="Últimos N días"),
+    business_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Pedidos por día de la semana y hora para heatmap."""
+    since = datetime.utcnow() - timedelta(days=days)
+
+    query = (
+        select(
+            extract("dow", Order.created_at).label("dow"),
+            extract("hour", Order.created_at).label("hour"),
+            func.count(Order.id).label("count"),
+        )
+        .where(Order.created_at >= since)
+        .group_by(extract("dow", Order.created_at), extract("hour", Order.created_at))
+    )
+    if business_id:
+        query = query.where(Order.business_id == business_id)
+
+    result = await db.execute(query)
+    return [
+        {"dow": int(row.dow), "hour": int(row.hour), "count": row.count}
+        for row in result.all()
+    ]
