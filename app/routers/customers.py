@@ -9,21 +9,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.database import get_db
-from app.models import Customer, Order, OrderItem, Product, LoyaltyRule, LoyaltyProgress
+from app.models import Customer, Order, OrderItem, Product, LoyaltyRule, LoyaltyProgress, Business
 from app.schemas.customer import CustomerCreate, CustomerOut, PurchaseCreate
 from app.schemas.order import OrderOut, OrderItemOut
+from app.auth import get_current_business
 
 router = APIRouter(prefix="/customers", tags=["customers"])
 
 
 @router.get("", response_model=list[CustomerOut])
 async def list_customers(
-    business_id: int = Query(..., description="ID del negocio"),
     search: str | None = Query(None, description="Buscar por nombre o teléfono"),
     db: AsyncSession = Depends(get_db),
+    business: Business = Depends(get_current_business),
 ):
-    """Lista clientes de un negocio con búsqueda opcional."""
-    query = select(Customer).where(Customer.business_id == business_id)
+    """Lista clientes del negocio autenticado con búsqueda opcional."""
+    query = select(Customer).where(Customer.business_id == business.id)
 
     if search:
         query = query.where(
@@ -40,10 +41,11 @@ async def list_customers(
 async def get_customer(
     customer_id: int,
     db: AsyncSession = Depends(get_db),
+    business: Business = Depends(get_current_business),
 ):
     """Perfil completo: datos, historial de pedidos y progreso de lealtad."""
     result = await db.execute(
-        select(Customer).where(Customer.id == customer_id)
+        select(Customer).where(Customer.id == customer_id, Customer.business_id == business.id)
     )
     customer = result.scalars().first()
     if not customer:
@@ -122,13 +124,14 @@ async def get_customer(
 async def create_customer(
     data: CustomerCreate,
     db: AsyncSession = Depends(get_db),
+    business: Business = Depends(get_current_business),
 ):
-    """Registra un nuevo cliente presencial."""
+    """Registra un nuevo cliente presencial para el negocio autenticado."""
     # Verificar duplicado por teléfono si se proporcionó
     if data.phone:
         result = await db.execute(
             select(Customer).where(
-                Customer.business_id == data.business_id,
+                Customer.business_id == business.id,
                 Customer.phone == data.phone,
             )
         )
@@ -139,7 +142,7 @@ async def create_customer(
                 detail="Ya existe un cliente con ese teléfono en este negocio"
             )
 
-    customer = Customer(**data.model_dump())
+    customer = Customer(**{**data.model_dump(exclude={"business_id"}), "business_id": business.id})
     db.add(customer)
     await db.flush()
     await db.refresh(customer)
@@ -151,13 +154,16 @@ async def register_purchase(
     customer_id: int,
     data: PurchaseCreate,
     db: AsyncSession = Depends(get_db),
+    business: Business = Depends(get_current_business),
 ):
     """
     Registra una compra presencial: crea pedido y actualiza lealtad.
     Usado desde el dashboard cuando un cliente compra en mostrador.
     """
-    # Verificar que el cliente existe
-    result = await db.execute(select(Customer).where(Customer.id == customer_id))
+    # Verificar que el cliente existe y pertenece al negocio autenticado
+    result = await db.execute(
+        select(Customer).where(Customer.id == customer_id, Customer.business_id == business.id)
+    )
     customer = result.scalars().first()
     if not customer:
         raise HTTPException(status_code=404, detail="Cliente no encontrado")

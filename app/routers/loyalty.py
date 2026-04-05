@@ -8,23 +8,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.database import get_db
-from app.models import LoyaltyRule, LoyaltyProgress
+from app.models import LoyaltyRule, LoyaltyProgress, Business
 from app.schemas.loyalty import (
     LoyaltyRuleCreate, LoyaltyRuleUpdate, LoyaltyRuleOut, LoyaltyProgressOut,
 )
+from app.auth import get_current_business
 
 router = APIRouter(prefix="/loyalty", tags=["loyalty"])
 
 
 @router.get("/rules", response_model=list[LoyaltyRuleOut])
 async def list_rules(
-    business_id: int = Query(..., description="ID del negocio"),
     db: AsyncSession = Depends(get_db),
+    business: Business = Depends(get_current_business),
 ):
-    """Lista las reglas de lealtad de un negocio."""
+    """Lista las reglas de lealtad del negocio autenticado."""
     result = await db.execute(
         select(LoyaltyRule)
-        .where(LoyaltyRule.business_id == business_id)
+        .where(LoyaltyRule.business_id == business.id)
         .options(selectinload(LoyaltyRule.product))
         .order_by(LoyaltyRule.created_at.desc())
     )
@@ -52,9 +53,10 @@ async def list_rules(
 async def create_rule(
     data: LoyaltyRuleCreate,
     db: AsyncSession = Depends(get_db),
+    business: Business = Depends(get_current_business),
 ):
-    """Crea una nueva regla de lealtad."""
-    rule = LoyaltyRule(**data.model_dump())
+    """Crea una nueva regla de lealtad para el negocio autenticado."""
+    rule = LoyaltyRule(**{**data.model_dump(exclude={"business_id"}), "business_id": business.id})
     db.add(rule)
     await db.flush()
 
@@ -86,11 +88,12 @@ async def update_rule(
     rule_id: int,
     data: LoyaltyRuleUpdate,
     db: AsyncSession = Depends(get_db),
+    business: Business = Depends(get_current_business),
 ):
-    """Edita una regla de lealtad existente."""
+    """Edita una regla de lealtad del negocio autenticado."""
     result = await db.execute(
         select(LoyaltyRule)
-        .where(LoyaltyRule.id == rule_id)
+        .where(LoyaltyRule.id == rule_id, LoyaltyRule.business_id == business.id)
         .options(selectinload(LoyaltyRule.product))
     )
     rule = result.scalars().first()
@@ -129,8 +132,17 @@ async def update_rule(
 async def get_customer_progress(
     customer_id: int,
     db: AsyncSession = Depends(get_db),
+    business: Business = Depends(get_current_business),
 ):
-    """Progreso de lealtad de un cliente en cada regla."""
+    """Progreso de lealtad de un cliente del negocio autenticado."""
+    from app.models import Customer
+    # Verificar que el cliente pertenece al negocio autenticado
+    customer_result = await db.execute(
+        select(Customer).where(Customer.id == customer_id, Customer.business_id == business.id)
+    )
+    if not customer_result.scalars().first():
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+
     result = await db.execute(
         select(LoyaltyProgress)
         .where(LoyaltyProgress.customer_id == customer_id)

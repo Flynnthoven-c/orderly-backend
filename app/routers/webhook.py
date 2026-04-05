@@ -8,8 +8,10 @@ from fastapi import APIRouter, Request, Depends, HTTPException
 from fastapi.responses import PlainTextResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from twilio.request_validator import RequestValidator
 
 from app.database import get_db
+from app.config import TWILIO_AUTH_TOKEN
 from app.models import Business, Product
 from app.services.conversation import get_session, clear_session, cleanup_expired_sessions
 from app.services.chatbot import get_bot_response
@@ -24,6 +26,18 @@ from app.services.whatsapp import send_whatsapp_message
 router = APIRouter()
 
 
+def _validate_twilio_signature(request: Request, form_data: dict) -> bool:
+    """Valida que el request venga realmente de Twilio usando X-Twilio-Signature."""
+    if not TWILIO_AUTH_TOKEN:
+        # Sin token configurado (desarrollo), permitir sin validacion
+        return True
+    validator = RequestValidator(TWILIO_AUTH_TOKEN)
+    signature = request.headers.get("X-Twilio-Signature", "")
+    # Reconstruir la URL completa tal como Twilio la ve
+    url = str(request.url)
+    return validator.validate(url, form_data, signature)
+
+
 @router.post("/webhook/whatsapp")
 async def whatsapp_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     """
@@ -35,6 +49,12 @@ async def whatsapp_webhook(request: Request, db: AsyncSession = Depends(get_db))
 
     # Parsear el form data de Twilio
     form = await request.form()
+    form_dict = dict(form)
+
+    # Validar firma de Twilio para evitar requests falsos
+    if not _validate_twilio_signature(request, form_dict):
+        return PlainTextResponse("Forbidden", status_code=403)
+
     from_number = form.get("From", "")       # whatsapp:+521234567890
     to_number = form.get("To", "")           # whatsapp:+1987654321 (número del negocio)
     body = form.get("Body", "").strip()

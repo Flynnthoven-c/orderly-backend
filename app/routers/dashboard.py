@@ -10,18 +10,20 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import Order, OrderItem, Product, Customer
+from app.models import Order, OrderItem, Product, Customer, Business
 from app.schemas.loyalty import DashboardStats
+from app.auth import get_current_business
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
 
 @router.get("/stats", response_model=DashboardStats)
 async def get_stats(
-    business_id: int = Query(..., description="ID del negocio"),
     db: AsyncSession = Depends(get_db),
+    business: Business = Depends(get_current_business),
 ):
-    """Estadísticas generales del negocio."""
+    """Estadísticas generales del negocio autenticado."""
+    business_id = business.id
     now = datetime.utcnow()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = today_start - timedelta(days=today_start.weekday())

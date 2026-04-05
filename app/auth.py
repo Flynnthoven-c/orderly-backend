@@ -85,9 +85,18 @@ async def require_admin(
 
 def authenticate_admin(email: str, password: str) -> str | None:
     """Autentica al admin y retorna un JWT, o None si falla."""
-    if email == ADMIN_EMAIL and password == ADMIN_PASSWORD:
-        return create_token({"role": "admin", "email": email})
-    return None
+    if email != ADMIN_EMAIL or not ADMIN_PASSWORD:
+        return None
+    # Verificar si ADMIN_PASSWORD ya es un hash bcrypt
+    if ADMIN_PASSWORD.startswith("$2b$") or ADMIN_PASSWORD.startswith("$2a$"):
+        if not verify_password(password, ADMIN_PASSWORD):
+            return None
+    else:
+        # Fallback para texto plano (desarrollo) — comparacion segura
+        import hmac
+        if not hmac.compare_digest(password, ADMIN_PASSWORD):
+            return None
+    return create_token({"role": "admin", "email": email})
 
 
 async def authenticate_business(email: str, password: str, db: AsyncSession) -> tuple[str, Business] | None:

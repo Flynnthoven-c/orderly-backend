@@ -11,8 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.database import get_db
-from app.models import Order, OrderItem, Product, Customer
+from app.models import Order, OrderItem, Product, Customer, Business
 from app.schemas.order import OrderCreate, OrderOut, OrderItemOut, OrderStatusUpdate
+from app.auth import get_current_business
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -21,17 +22,17 @@ VALID_STATUSES = {"pending", "preparing", "ready", "delivered"}
 
 @router.get("", response_model=list[OrderOut])
 async def list_orders(
-    business_id: int = Query(..., description="ID del negocio"),
     status: str | None = Query(None, description="Filtrar por estado"),
     channel: str | None = Query(None, description="Filtrar por canal"),
     date_from: str | None = Query(None, description="Fecha inicio (YYYY-MM-DD)"),
     date_to: str | None = Query(None, description="Fecha fin (YYYY-MM-DD)"),
     db: AsyncSession = Depends(get_db),
+    business: Business = Depends(get_current_business),
 ):
-    """Lista pedidos con filtros opcionales."""
+    """Lista pedidos del negocio autenticado con filtros opcionales."""
     query = (
         select(Order)
-        .where(Order.business_id == business_id)
+        .where(Order.business_id == business.id)
         .options(selectinload(Order.items).selectinload(OrderItem.product))
         .options(selectinload(Order.customer))
         .order_by(Order.created_at.desc())
@@ -57,11 +58,12 @@ async def list_orders(
 async def get_order(
     order_id: int,
     db: AsyncSession = Depends(get_db),
+    business: Business = Depends(get_current_business),
 ):
-    """Detalle completo de un pedido."""
+    """Detalle completo de un pedido del negocio autenticado."""
     result = await db.execute(
         select(Order)
-        .where(Order.id == order_id)
+        .where(Order.id == order_id, Order.business_id == business.id)
         .options(selectinload(Order.items).selectinload(OrderItem.product))
         .options(selectinload(Order.customer))
     )
@@ -76,6 +78,7 @@ async def get_order(
 async def create_order(
     data: OrderCreate,
     db: AsyncSession = Depends(get_db),
+    business: Business = Depends(get_current_business),
 ):
     """Crea un pedido presencial desde el dashboard."""
     # Calcular total e items
@@ -83,7 +86,9 @@ async def create_order(
     items_to_create = []
 
     for item in data.items:
-        result = await db.execute(select(Product).where(Product.id == item.product_id))
+        result = await db.execute(
+            select(Product).where(Product.id == item.product_id, Product.business_id == business.id)
+        )
         product = result.scalars().first()
         if not product:
             raise HTTPException(status_code=400, detail=f"Producto {item.product_id} no encontrado")
@@ -93,7 +98,7 @@ async def create_order(
         items_to_create.append((item, unit_price))
 
     order = Order(
-        business_id=data.business_id,
+        business_id=business.id,
         customer_id=data.customer_id,
         status="pending",
         total=total,
@@ -128,8 +133,9 @@ async def update_order_status(
     order_id: int,
     data: OrderStatusUpdate,
     db: AsyncSession = Depends(get_db),
+    business: Business = Depends(get_current_business),
 ):
-    """Cambia el estado de un pedido."""
+    """Cambia el estado de un pedido del negocio autenticado."""
     if data.status not in VALID_STATUSES:
         raise HTTPException(
             status_code=400,
@@ -138,7 +144,7 @@ async def update_order_status(
 
     result = await db.execute(
         select(Order)
-        .where(Order.id == order_id)
+        .where(Order.id == order_id, Order.business_id == business.id)
         .options(selectinload(Order.items).selectinload(OrderItem.product))
         .options(selectinload(Order.customer))
     )
